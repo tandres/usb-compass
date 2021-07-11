@@ -9,5 +9,11 @@ cortex-m = "0.6.0"
 cortex-m-rt = "0.6.10"
 cortex-m-semihosting = "0.3.3"
 panic-semihosting = "0.5.6"
+usb-device = "0.2.8"
+usbd-serial = "0.1.1"
+
+[dependencies.stm32f3xx-hal]
+version = "0.7.0"
+features = ["ld", "stm32f303xc", "stm32-usbd"]
 
 
