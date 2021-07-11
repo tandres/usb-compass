@@ -1,8 +1,13 @@
 [package]
+authors = ["Trenton Andres <trenton.andres@gmail.com>"]
 name = "board"
 version = "0.1.0"
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
+cortex-m = "0.6.0"
+cortex-m-rt = "0.6.10"
+cortex-m-semihosting = "0.3.3"
+panic-semihosting = "0.5.6"
+
+
