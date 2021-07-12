@@ -6,6 +6,7 @@ use panic_semihosting as _; // logs messages to the host stderr; requires a debu
 
 use stm32f3xx_hal as hal;
 
+use common::usb::{VENDOR_ID, PROD_ID};
 use core::cell::RefCell;
 
 use cortex_m::{asm::delay, interrupt::Mutex};
@@ -71,7 +72,7 @@ fn main() -> ! {
 
     let mut serial = SerialPort::new(&usb_bus);
     // Thanks interbiometrics!
-    let vid_pid = UsbVidPid(0x1209, 0x001);
+    let vid_pid = UsbVidPid(VENDOR_ID, PROD_ID);
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, vid_pid)
         .manufacturer("Fake Company")
         .product("Serial Port")

@@ -1,9 +1,6 @@
 use libusb::{Context, Device};
 use std::time::Duration;
-
-const VENDOR_ID: u16 = 0x1209;
-const PROD_ID: u16 = 0x0001;
-
+use common::usb::{VENDOR_ID, PROD_ID};
 
 enum AppState {
     Connected,
