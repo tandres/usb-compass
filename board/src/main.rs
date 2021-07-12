@@ -17,8 +17,12 @@ use hal::{
     interrupt,
     pac,
     timer::{Timer, Event},
+    usb::{Peripheral, UsbBus},
 };
 use hal::prelude::*;
+
+use usb_device::prelude::*;
+use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
 type Timer7 = Timer<pac::TIM7>;
 static TIMER7: Mutex<RefCell<Option<Timer7>>> = Mutex::new(RefCell::new(None));
@@ -31,11 +35,49 @@ fn main() -> ! {
     let peris = pac::Peripherals::take().unwrap();
     let mut acr = peris.FLASH.constrain().acr;
     let mut rcc = peris.RCC.constrain();
-    let clocks = rcc.cfgr.freeze(&mut acr);
+
+
+    let clocks = rcc.cfgr
+        .use_hse(8.MHz())
+        .sysclk(48.MHz())
+        .pclk1(24.MHz())
+        .pclk2(24.MHz())
+        .freeze(&mut acr);
 
     let mut gpioe = peris.GPIOE.split(&mut rcc.ahb);
     let mut red_led = gpioe.pe13.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
     let green_led = gpioe.pe15.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
+
+
+    let mut gpioa = peris.GPIOA.split(&mut rcc.ahb);
+    let mut usb_dp = gpioa
+        .pa12
+        .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
+    usb_dp.set_low().ok();
+    delay(clocks.sysclk().0 / 100);
+
+    let usb_dm = gpioa
+        .pa11
+        .into_af14_push_pull(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
+    let usb_dp = usb_dp
+        .into_af14_push_pull(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
+
+    let usb = Peripheral {
+        usb: peris.USB,
+        pin_dm: usb_dm,
+        pin_dp: usb_dp,
+    };
+    let usb_bus = UsbBus::new(usb);
+
+    let mut serial = SerialPort::new(&usb_bus);
+    // Thanks interbiometrics!
+    let vid_pid = UsbVidPid(0x1209, 0x001);
+    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, vid_pid)
+        .manufacturer("Fake Company")
+        .product("Serial Port")
+        .serial_number("TEST")
+        .device_class(USB_CLASS_CDC)
+        .build();
 
     let mut tim7 = Timer::tim7(peris.TIM7, 1.Hz(), clocks, &mut rcc.apb1);
     tim7.listen(Event::Update);
@@ -50,8 +92,35 @@ fn main() -> ! {
     hprintln!("Starting loop!").unwrap();
 
     loop {
-        red_led.toggle().unwrap();
-        delay(8000000)
+        if !usb_dev.poll(&mut [&mut serial]) {
+            continue;
+        }
+
+        let mut buf = [0u8, 64];
+
+        match serial.read(&mut buf) {
+            Ok(count) if count > 0 => {
+                red_led.set_high().ok();
+
+                for c in buf[0..count].iter_mut() {
+                    if 0x61 <= *c && *c <= 0x7a {
+                        *c &= !0x20;
+                    }
+                }
+
+                let mut write_offset = 0;
+                while write_offset < count {
+                    match serial.write(&buf[write_offset..count]) {
+                        Ok(len) if len > 0 => {
+                            write_offset += len;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        red_led.set_low().ok();
     }
 }
 
