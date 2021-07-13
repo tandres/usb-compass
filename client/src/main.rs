@@ -1,122 +1,162 @@
-use libusb::{Context, Device};
+use libusb::{Context, Device, DeviceHandle};
 use std::time::Duration;
 use common::usb::{VENDOR_ID, PROD_ID};
+use tokio::{
+    sync::mpsc::{UnboundedSender, UnboundedReceiver},
+    time::sleep,
+};
 
-enum AppState {
-    Connected,
-    Scanning,
-}
+mod error;
 
-struct App {
-    state: AppState,
-    context: Context,
-}
+pub use error::{CompError, Result};
 
-impl App {
-    fn new() -> App {
-        let context = libusb::Context::new().unwrap();
+const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
+const WRITE_ADDR: u8 = 2;
+const READ_ADDR: u8 = 130;
 
-        App {
-            state: AppState::Scanning,
-            context,
+type Message = Vec<u8>;
+
+fn scan<'a>(context: &'a Context) -> Result<Option<Device<'a>>> {
+    println!("Scanning!");
+    for device in context.devices()?.iter() {
+        let device_desc = device.device_descriptor()?;
+
+        println!("Bux {:03} Device {:03} ID {:04x}:{:04x} configs: {}",
+            device.bus_number(),
+            device.address(),
+            device_desc.vendor_id(),
+            device_desc.product_id(),
+            device_desc.num_configurations());
+        if device_desc.vendor_id() == VENDOR_ID && device_desc.product_id() == PROD_ID {
+            println!("Found matching device!");
+            return Ok(Some(device));
         }
     }
+    return Ok(None);
+}
 
-    async fn turn(&mut self) {
-        self.state = match self.state {
-            AppState::Connected => {
-                if self.connected_update() {
-                    AppState::Connected
-                } else {
-                    AppState::Scanning
-                }
-            }
-            AppState::Scanning => {
-                tokio::time::sleep(Duration::from_millis(1000)).await;
-                if let Some(device) = self.scan() {
-                    let config_descriptor = device.active_config_descriptor()
-                        .expect("Failed to get config descriptor");
-                    println!("Device found! Config Descriptor: {:?}", config_descriptor);
-                    let interfaces = config_descriptor.interfaces();
-                    for interface in interfaces {
-                        let number = interface.number();
-                        println!("Interface Number: {}", number);
-                        for descriptor in interface.descriptors() {
-                            println!("{:#?}", descriptor);
-                            for endpoint in descriptor.endpoint_descriptors() {
-                                println!("Endpoint {}: \n\tXfer Type: {:?}\n\tUsage Type: {:?}\n\tDirection: {:?}\n\tAddr: {:?}",
-                                    endpoint.number(),
-                                    endpoint.transfer_type(),
-                                    endpoint.usage_type(),
-                                    endpoint.direction(),
-                                    endpoint.address());
-                            }
-                        }
-                    }
-                    let mut handle = device.open().expect("Failed to open dev!");
-                    let config = handle.active_configuration().expect("Failed to read config");
-                    let langs = handle.read_languages(Duration::from_millis(500))
-                        .expect("Failed to read langs");
-                    println!("Langs: {:?}", langs);
-                    // let config_str = handle.read_configuration_string(langs[0], &config_descriptor, Duration::from_millis(500)).expect("Failed to read config string");
-                    // println!("Config: {} {}", config, config_str);
-                    println!("Kernel driver: {:?}", handle.kernel_driver_active(config));
-                    if handle.kernel_driver_active(config).expect("Failed to get kernel driver") {
-                        handle
-                            .detach_kernel_driver(config)
-                            .expect("Failed to detach kernel driver");
-                    }
 
-                    handle.claim_interface(1).expect("Failed to claim interface");
-                    let buf = b"test_string".clone();
-                    handle.write_bulk(2, &buf, Duration::from_millis(500))
-                        .expect("Failed to write bulk");
-                    println!("{:?}", buf);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let mut rbuf: [u8; 64] = [0; 64];
-                    loop {
-                        let res = handle.read_bulk(130, &mut rbuf, Duration::from_millis(500));
-                        if let Ok(num) = res {
-                            println!("Read {} bytes: {}", num, String::from_utf8_lossy(&rbuf[..num]));
-                        }
-                    }
+fn configure<'a>(device: &Device<'a>, config_num: u8, claims: Vec<u8>) -> Result<DeviceHandle<'a>> {
+    // Just sort of assuming now that this is our device. Maybe I will do more
+    // with this later?
+    let mut handle = device.open()?;
+    if handle.kernel_driver_active(config_num)? {
+        handle.detach_kernel_driver(config_num)?;
+    }
+    for claim in claims {
+        handle.claim_interface(claim)?;
+    }
+    Ok(device.open()?)
+}
 
-                    AppState::Connected
-                } else {
-                    AppState::Scanning
-                }
-            }
+fn print_device_info<'a>(device: &Device<'a>, print: bool) -> Result<()> {
+    if !print {
+        return Ok(());
+    }
+    let number_configs = device.device_descriptor()?.num_configurations();
+    let active_config_descriptor = device.active_config_descriptor()?;
+    let active_number = active_config_descriptor.number();
+    println!("Device has {} configurations:", number_configs);
+    for i in 0..number_configs {
+        let config = device.config_descriptor(i)?;
+        let config_number = config.number();
+        let active_flag = if active_number == config_number {
+            "*"
+        } else {
+            ""
         };
-    }
-
-    fn connected_update(&mut self) -> bool {
-        true
-    }
-
-    fn scan<'a>(&'a mut self) -> Option<Device<'a>> {
-        println!("Scanning!");
-        for mut device in self.context.devices().unwrap().iter() {
-            let device_desc = device.device_descriptor().unwrap();
-
-            println!("Bux {:03} Device {:03} ID {:04x}:{:04x} configs: {}",
-                device.bus_number(),
-                device.address(),
-                device_desc.vendor_id(),
-                device_desc.product_id(),
-                device_desc.num_configurations());
-            if device_desc.vendor_id() == VENDOR_ID && device_desc.product_id() == PROD_ID {
-                return Some(device);
+        println!("\tConfig {}{}:", config_number, active_flag);
+        println!("\tInterfaces {}:", config.num_interfaces());
+        for interface in config.interfaces() {
+            println!("\t\tInterface no {}:", interface.number());
+            for desc in interface.descriptors() {
+                println!("\t\t\tDescriptor no {}", desc.interface_number());
+                println!("\t\t\tEndpoints {}:", desc.num_endpoints());
+                for endpoint in desc.endpoint_descriptors() {
+                    println!("\t\t\t\t#{} @{} dir:{:?} type:{:?}",
+                        endpoint.number(),
+                        endpoint.address(),
+                        endpoint.direction(),
+                        endpoint.transfer_type());
+                }
             }
         }
-        return None;
+    }
+    Ok(())
+}
+
+fn read_bulk<'a>(addr: u8, handle: &DeviceHandle<'a>) -> Result<Message> {
+    let mut buf: [u8; 64] = [0; 64];
+    let num = handle.read_bulk(addr, &mut buf, DEFAULT_TIMEOUT)?;
+    Ok(buf[..num].to_vec())
+}
+
+fn write_bulk<'a>(addr: u8, buf: &[u8], handle: &DeviceHandle<'a>) -> Result<usize> {
+    Ok(handle.write_bulk(addr, buf, DEFAULT_TIMEOUT)?)
+}
+
+async fn usb(mut to_board_rx: UnboundedReceiver<Message>, from_board_tx: UnboundedSender<Message>) -> Result<()> {
+    let context = libusb::Context::new()?;
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        if let Some(device) = scan(&context)? {
+            print_device_info(&device, true)?;
+            let handle = configure(&device, 1, vec![1])?;
+            loop {
+                if let Some(msg) = to_board_rx.recv().await {
+                    println!("Sending: {:?}", msg);
+                    if write_bulk(WRITE_ADDR, &msg, &handle).is_err() {
+                        break;
+                    }
+                }
+                match read_bulk(READ_ADDR, &handle) {
+                    Ok(buf) => {
+                        println!("Received: {:?}", buf);
+                        from_board_tx.send(buf).unwrap();
+                    }
+                    Err(e) => {
+                        println!("Error: {}", e);
+                        break;
+                    }
+                }
+            }
+        } else {
+            continue;
+        }
     }
 }
+
+async fn chatter(to_board_tx: UnboundedSender<Message>, mut from_board_rx: UnboundedReceiver<Message>) {
+    tokio::spawn(async move {
+        loop {
+            if let Some(val) = from_board_rx.recv().await {
+                println!("Board said: {:?}", String::from_utf8_lossy(&val));
+            }
+        }
+    });
+    loop {
+        sleep(Duration::from_secs(1)).await;
+        let msg = b"hello!".to_vec();
+        to_board_tx.send(msg).unwrap();
+    }
+}
+
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let mut app = App::new();
-    loop {
-        app.turn().await
+    let (to_board_tx, to_board_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (from_board_tx, from_board_rx) = tokio::sync::mpsc::unbounded_channel();
+    let usb = usb(to_board_rx, from_board_tx);
+    let chatter = chatter(to_board_tx, from_board_rx);
+
+    tokio::select! {
+        _ = usb => {
+            println!("Usb returned");
+        }
+        _ = chatter => {
+            println!("Chatter returned");
+        }
     }
 }
 
