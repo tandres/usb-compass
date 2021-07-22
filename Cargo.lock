@@ -12,6 +12,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "array-init"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6945cc5422176fc5e602e590c2878d2c2acd9a4fe20a4baa7c28022521698ec6"
+
+[[package]]
 name = "as-slice"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -68,6 +74,8 @@ dependencies = [
  "cortex-m-rt",
  "cortex-m-semihosting",
  "panic-semihosting",
+ "serde",
+ "serde_cbor",
  "stm32f3xx-hal",
  "usb-device",
  "usbd-serial",
@@ -132,8 +140,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "cobs"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c44be444fc7959957b0f331d596bafcfbbe30cbdf41665d1c40c68eda24137f6"
+
+[[package]]
 name = "common"
 version = "0.1.0"
+dependencies = [
+ "cobs",
+ "embedded-hal",
+ "nb 1.0.0",
+ "ringbuffer",
+ "serde",
+ "serde-big-array",
+ "serde_cbor",
+ "usb-device",
+]
 
 [[package]]
 name = "cortex-m"
@@ -245,6 +269,12 @@ dependencies = [
  "typenum",
  "version_check",
 ]
+
+[[package]]
+name = "half"
+version = "1.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62aca2aba2d62b4a7f5b33f3712cb1b0692779a56fb510499d5c0aa594daeaf3"
 
 [[package]]
 name = "itoa"
@@ -419,6 +449,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2a38df5b15c8d5c7e8654189744d8e396bddc18ad48041a500ce52d6948941f"
 
 [[package]]
+name = "ringbuffer"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d32014caabacedc94e2a41552987d3edd63ad09a1d2f94cb91c183abd43288a3"
+dependencies = [
+ "array-init",
+]
+
+[[package]]
 name = "rtcc"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -483,6 +522,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7505abeacaec74ae4778d9d9328fe5a5d04253220a85c4ee022239fc996d03"
 dependencies = [
  "serde_derive",
+]
+
+[[package]]
+name = "serde-big-array"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18b20e7752957bbe9661cff4e0bb04d183d0948cdab2ea58cdb9df36a61dfe62"
+dependencies = [
+ "serde",
+ "serde_derive",
+]
+
+[[package]]
+name = "serde_cbor"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e18acfa2f90e8b735b2836ab8d538de304cbb6729a7360729ea5a895d15a622"
+dependencies = [
+ "half",
+ "serde",
 ]
 
 [[package]]

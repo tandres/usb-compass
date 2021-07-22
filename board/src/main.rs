@@ -6,7 +6,11 @@ use panic_semihosting as _; // logs messages to the host stderr; requires a debu
 
 use stm32f3xx_hal as hal;
 
-use common::usb::{VENDOR_ID, PROD_ID};
+use common::{
+    link::Link,
+    usb::{VENDOR_ID, PROD_ID},
+};
+
 use core::cell::RefCell;
 
 use cortex_m::{asm::delay, interrupt::Mutex};
@@ -18,7 +22,7 @@ use hal::{
     interrupt,
     pac,
     timer::{Timer, Event},
-    usb::{Peripheral, UsbBus},
+    usb::{Peripheral, UsbBus as UsbBusType},
 };
 use hal::prelude::*;
 
@@ -36,7 +40,6 @@ fn main() -> ! {
     let peris = pac::Peripherals::take().unwrap();
     let mut acr = peris.FLASH.constrain().acr;
     let mut rcc = peris.RCC.constrain();
-
 
     let clocks = rcc.cfgr
         .use_hse(8.MHz())
@@ -68,9 +71,11 @@ fn main() -> ! {
         pin_dm: usb_dm,
         pin_dp: usb_dp,
     };
-    let usb_bus = UsbBus::new(usb);
+    let usb_bus = UsbBusType::new(usb);
 
-    let mut serial = SerialPort::new(&usb_bus);
+    let serial = SerialPort::new(&usb_bus);
+
+    let mut link = Link::new(serial);
     // Thanks interbiometrics!
     let vid_pid = UsbVidPid(VENDOR_ID, PROD_ID);
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, vid_pid)
@@ -93,37 +98,41 @@ fn main() -> ! {
     hprintln!("Starting loop!").unwrap();
 
     loop {
-        if !usb_dev.poll(&mut [&mut serial]) {
+        if !usb_dev.poll(&mut [&mut link]) {
             continue;
         }
 
-        let mut buf = [0u8, 64];
+        let msg = link.try_recv().unwrap();
+        hprintln!("{:?}", msg).unwrap();
 
-        match serial.read(&mut buf) {
-            Ok(count) if count > 0 => {
-                red_led.set_high().ok();
+        // let mut buf = [0u8, 64];
 
-                for c in buf[0..count].iter_mut() {
-                    if 0x61 <= *c && *c <= 0x7a {
-                        *c &= !0x20;
-                    }
-                }
+        // match serial.read(&mut buf) {
+        //     Ok(count) if count > 0 => {
+        //         red_led.set_high().ok();
 
-                let mut write_offset = 0;
-                while write_offset < count {
-                    match serial.write(&buf[write_offset..count]) {
-                        Ok(len) if len > 0 => {
-                            write_offset += len;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-        red_led.set_low().ok();
+        //         for c in buf[0..count].iter_mut() {
+        //             if 0x61 <= *c && *c <= 0x7a {
+        //                 *c &= !0x20;
+        //             }
+        //         }
+
+        //         let mut write_offset = 0;
+        //         while write_offset < count {
+        //             match serial.write(&buf[write_offset..count]) {
+        //                 Ok(len) if len > 0 => {
+        //                     write_offset += len;
+        //                 }
+        //                 _ => {}
+        //             }
+        //         }
+        //     }
+        //     _ => {}
+        // }
+        // red_led.set_low().ok();
     }
 }
+
 
 #[interrupt]
 fn TIM7() {
