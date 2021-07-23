@@ -1,173 +1,274 @@
+use serde_cbor::error::Error as CborError;
+use cobs::{max_encoding_length, encode, decode};
 use crate::message::Message;
-use embedded_hal::serial::{Read, Write};
-use serde::{Deserialize, Serialize};
-use serde_cbor::{
-    ser::SliceWrite,
-    Serializer,
-    error::Error as CborError,
-    de::from_mut_slice,
-};
-use usb_device::class_prelude::*;
-
-const HEADER_SIZE: usize = 4; //Start, size(u16), c
-const FRAME_DELIM: u8 = 0xFF;
+use static_assertions::const_assert;
 
 #[derive(Debug)]
-pub enum LinkError<E> {
+pub enum LinkError {
     Cbor(CborError),
-    WouldBlock,
-    Serial(E),
+    PacketTooLarge,
+    PacketNoStop,
+    Cobs,
+    DestTooSmall,
 }
 
-impl<E> From<CborError> for LinkError<E> {
-    fn from(e: CborError) -> LinkError<E> {
+impl From<CborError> for LinkError {
+    fn from(e: CborError) -> LinkError {
         LinkError::Cbor(e)
     }
 }
 
-impl<E> From<nb::Error<E>> for LinkError<E> {
-    fn from(e: nb::Error<E>) -> LinkError<E> {
-        match e {
-            nb::Error::Other(e) => {
-                LinkError::Serial(e)
-            }
-            nb::Error::WouldBlock => {
-                LinkError::WouldBlock
-            }
-        }
-    }
+type Result<T> = core::result::Result<T, LinkError>;
+
+const MAX_PACKET_SIZE: usize = Message::MAX_SIZE;
+const_assert!(MAX_PACKET_SIZE < u16::MAX as usize);
+struct Packet {
+    size: u16,
+    write: u16,
+    // read: u16,
+    data: [u8; MAX_PACKET_SIZE],
 }
 
-type Result<T, E> = core::result::Result<T, LinkError<E>>;
-
-
-const BUFFER_SIZE: usize = 100;
-pub struct Link<T> {
-    inner: T,
-}
-
-impl<T, ER, EW> Link<T>
-where
-    T: Read<u8, Error = ER> + Write<u8, Error = EW>,
-    LinkError<ER>: From<nb::Error<ER>>,
-    LinkError<EW>: From<nb::Error<EW>>,
-{
-    pub fn new(inner: T) -> Self {
-        Self {
-            inner,
+impl Packet {
+    const START: u8 = 0x01;
+    const STOP: u8 = 0x00;
+    const HEADER_SIZE: usize = 3;
+    fn new() -> Packet {
+        Packet {
+            size: 0,
+            write: 0,
+            // read: 0,
+            data: [0u8; MAX_PACKET_SIZE],
         }
     }
 
-    pub fn send(&mut self, message: &Message) -> Result<(), EW> {
-        let mut buf = [0u8; Message::MAX_SIZE];
-        let mut ser = Serializer::new(SliceWrite::new(&mut buf[..]));
-        message.serialize(&mut ser)?;
+    fn new_with_size(size: u16) -> Result<Self> {
+        let mut packet = Self::new();
+        packet.set_header(size)?;
+        packet.set_write(Self::HEADER_SIZE as u16);
+        Ok(packet)
+    }
 
-        let size = ser.into_inner().bytes_written();
-        for i in 0..size {
-            self.inner.write(buf[i])?;
+    fn set_header(&mut self, size: u16) -> Result<()> {
+        if size as usize > MAX_PACKET_SIZE - Self::HEADER_SIZE {
+            return Err(LinkError::PacketTooLarge);
         }
+        self.size = size;
+        self.buffer_write_start();
+        self.buffer_write_size(size);
         Ok(())
     }
 
-    pub fn try_recv(&mut self) -> Result<Message, ER> {
-        let mut buf = [0u8; Message::MAX_SIZE];
-        let mut index = 0;
-        loop {
-            match self.inner.read() {
-                Ok(d) => {
-                    buf[index] = d;
-                    index += 1;
-                },
-                Err(nb::Error::WouldBlock) => {
-                    break;
-                },
-                Err(_e) => {
-                    panic!("Errored before my time!");
-                }
-            }
+    fn set_write(&mut self, write: u16) {
+        self.write = write;
+    }
+
+    fn buffer_write_stop(&mut self) {
+        self.data[self.write as usize] = Self::STOP;
+        self.write += 1;
+        self.size += 1;
+    }
+
+    fn buffer_write_start(&mut self) {
+        self.data[0] = Self::START;
+    }
+
+    fn buffer_write_size(&mut self, size: u16) {
+        let size = size.to_le_bytes();
+        self.data[1] = size[0];
+        self.data[2] = size[1];
+    }
+
+    // pub fn get_size(&self) -> usize {
+    //     self.size as usize
+    // }
+
+    fn push(&mut self, data: u8) -> bool {
+        self.data[self.write as usize] = data;
+        self.write += 1;
+        self.write == self.size
+    }
+
+    fn decode_data(&self, output: &mut [u8]) -> Result<usize> {
+        if output.len() < self.size as usize - Self::HEADER_SIZE {
+            return Err(LinkError::DestTooSmall);
         }
-        let msg = from_mut_slice(&mut buf[..index])?;
-        Ok(msg)
+        match decode(&self.data[Self::HEADER_SIZE..self.size as usize], output) {
+            Ok(size) => Ok(size),
+            Err(_) => Err(LinkError::Cobs),
+        }
+    }
+
+    fn build(data: &[u8]) -> Result<Packet> {
+        if data.len() > MAX_PACKET_SIZE || max_encoding_length(data.len()) > MAX_PACKET_SIZE {
+            return Err(LinkError::PacketTooLarge);
+        }
+        let mut packet = Packet::new();
+        let size = encode(data, &mut packet.data[Self::HEADER_SIZE..]) + Self::HEADER_SIZE;
+        packet.set_header(size as u16)?;
+        packet.set_write(size as u16);
+        packet.buffer_write_stop();
+        Ok(packet)
+    }
+
+    fn to_bytes(self) -> (usize, [u8; MAX_PACKET_SIZE]) {
+        (self.size as usize, self.data)
     }
 }
 
-impl<T, B> UsbClass<B> for Link<T>
-where
-    T: UsbClass<B>,
-    B: UsbBus,
-{
-    fn get_configuration_descriptors(&self, writer: &mut DescriptorWriter) -> usb_device::Result<()> {
-        self.inner.get_configuration_descriptors(writer)
+enum RxState {
+    Idle,
+    Start,
+    Size(u8),
+    Data(Packet),
+    Stop(Packet),
+}
+
+struct RxStateMachine { inner: Option<RxState> }
+
+impl RxStateMachine {
+    fn new() -> RxStateMachine {
+        RxStateMachine { inner: Some(RxState::Idle) }
     }
 
-    fn reset(&mut self) {
-         self.inner.reset()
+    fn turn(&mut self, data: u8) -> Result<Option<Packet>> {
+        use RxState::*;
+        let mut res = Ok(None);
+        let next_state = match self.inner.take().unwrap() {
+            Idle => {
+                if Packet::START == data {
+                    Start
+                } else {
+                    Idle
+                }
+            }
+            Start => {
+                Size(data)
+            }
+            Size(lb) => {
+                let size = u16::from_le_bytes([lb, data]);
+                match Packet::new_with_size(size) {
+                    Ok(packet) => Data(packet),
+                    Err(e) => {
+                        res = Err(e);
+                        Idle
+                    }
+                }
+            }
+            Data(mut packet) => {
+                if packet.push(data) {
+                    Stop(packet)
+                } else {
+                    Data(packet)
+                }
+            }
+            Stop(packet) => {
+                if Packet::STOP == data {
+                    res = Ok(Some(packet));
+                    Idle
+                } else {
+                    res = Err(LinkError::PacketNoStop);
+                    Idle
+                }
+            }
+        };
+        self.inner = Some(next_state);
+        return res;
+    }
+}
+
+pub struct Link {
+    rx_state: RxStateMachine,
+}
+
+impl Link {
+    pub fn new() -> Self {
+        Self {
+            rx_state : RxStateMachine::new(),
+        }
     }
 
-    fn endpoint_in_complete(&mut self, addr: EndpointAddress) {
-        self.inner.endpoint_in_complete(addr)
+    pub fn encode(&mut self, message: &Message) -> Result<(usize, [u8; Message::MAX_SIZE])> {
+        let mut buf = [0u8; Message::MAX_SIZE];
+        let size = message.write_bytes(&mut buf)?;
+        Ok(Packet::build(&buf[..size])?.to_bytes())
     }
 
-    fn control_in(&mut self, xfer: ControlIn<B>) { self.inner.control_in(xfer); }
+    pub fn push(&mut self, data: u8) -> Result<Option<Message>> {
+        if let Some(packet) = self.rx_state.turn(data)? {
+            let mut buf = [0u8; Message::MAX_SIZE];
+            let size = packet.decode_data(&mut buf[..])?;
+            Ok(Some(Message::from_bytes(&buf[..size])?))
+        } else {
+            Ok(None)
+        }
+    }
 
-    fn control_out(&mut self, xfer: ControlOut<B>) { self.inner.control_out(xfer); }
+    pub fn push_slice(&mut self, data: &[u8]) -> Result<(usize, Option<Message>)> {
+        let mut i = 0;
+        for b in data {
+            let res = self.push(*b)?;
+            i += 1;
+            if res.is_some() {
+                return Ok((i, res));
+            }
+        }
+        Ok((i, None))
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use ringbuffer::{ConstGenericRingBuffer, RingBufferWrite, RingBufferRead, RingBuffer};
     use crate::Message;
     use super::Link;
-    use embedded_hal::serial::{Read, Write};
-    const BSIZE: usize = 256;
-    struct FakeSerial {
-        buf: ConstGenericRingBuffer<u8, BSIZE>,
-    }
 
-    impl FakeSerial {
-        fn new() -> Self {
-            Self {
-                buf: ConstGenericRingBuffer::<u8, BSIZE>::new(),
-            }
-        }
-    }
-
-    impl Read<u8> for FakeSerial {
-        type Error = ();
-
-        fn read(&mut self) -> nb::Result<u8, Self::Error> {
-            if self.buf.is_empty() {
-                Err(nb::Error::WouldBlock)
-            } else {
-                Ok(self.buf.dequeue().unwrap())
-            }
-        }
-    }
-
-    impl Write<u8> for FakeSerial {
-        type Error = ();
-        fn write(&mut self, word: u8) -> nb::Result<(), Self::Error> {
-            if self.buf.is_full() {
-                Err(nb::Error::WouldBlock)
-            } else {
-                self.buf.push(word);
-                Ok(())
-            }
-        }
-
-        fn flush(&mut self) -> nb::Result<(), Self::Error> {
-            //nop
-            Ok(())
-        }
+    fn echo_test(msg: Message) {
+        let mut link = Link::new();
+        let (size, buf) = link.encode(&msg).unwrap();
+        let (used, rx) = link.push_slice(&buf[..size]).unwrap();
+        assert_eq!(used, size);
+        assert_eq!(msg, rx.unwrap());
     }
 
     #[test]
     fn say_hello() {
         let msg = Message::Hello;
-        let mut link = Link::new(FakeSerial::new());
-        link.send(&msg);
-        let mut rx_msg = link.try_recv().unwrap();
-        assert_eq!(msg, rx_msg);
+        let mut link = Link::new();
+        let (size, buf) = link.encode(&msg).unwrap();
+        for b in &buf[..size] {
+            let res: Option<Message> = link.push(*b).unwrap();
+            if let Some(rx) = res {
+                assert_eq!(msg, rx);
+                break;
+            }
+        }
+    }
+
+    // #[test]
+    // fn cobs_test() {
+    //     let msg = Message::Hello;
+    //     let mut buf = [0u8; 100];
+    //     let size = msg.write_bytes(&mut buf).unwrap();
+    //     println!("Size: {} buf: {:?}", size, &buf[..size]);
+    //     let mut output_enc = [0u8; 100];
+
+    //     let outsize = encode(&buf[..size], &mut output_enc);
+    //     println!("Size: {} buf: {:?}", outsize, &output_enc[..outsize]);
+    //     let mut output_dec = [0u8; 100];
+
+    //     let outsize = decode(&output_enc[..outsize], &mut output_dec).unwrap();
+    //     println!("Size: {} buf: {:?}", outsize, &output_dec[..outsize]);
+
+
+    // }
+
+    #[test]
+    fn say_hello_slice() {
+        echo_test(Message::Hello);
+    }
+
+    #[test]
+    fn large_buffer() {
+        echo_test(Message::log(b"Hello, World"))
     }
 }
