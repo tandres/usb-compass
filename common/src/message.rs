@@ -5,7 +5,6 @@ use serde_cbor::{
     Serializer,
     error::Error as CborError,
     de::from_mut_slice,
-    Deserializer,
 };
 
 big_array! { BigArray; }
@@ -17,6 +16,12 @@ pub enum Message {
     Hello,
     HelloAck,
     Log(InternalBuffer),
+}
+
+impl Default for Message {
+    fn default() -> Message {
+        Message::Nop
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -93,7 +98,7 @@ mod tests {
         let msg = Message::Hello;
         let mut buf = [0u8; Message::MAX_SIZE];
         let size = msg.write_bytes(&mut buf).unwrap();
-        let rx_msg = Message::from_bytes(&buf[..size]).unwrap();
+        let rx_msg = Message::from_bytes(&mut buf[..size]).unwrap();
         assert_eq!(msg, rx_msg);
     }
 }

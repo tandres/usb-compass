@@ -8,7 +8,8 @@ pub mod usb {
 
 pub mod link;
 pub mod message;
-
+pub mod message_queue;
 
 pub use link::Link;
 pub use message::Message;
+pub use message_queue::MessageQueue;

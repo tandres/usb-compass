@@ -29,6 +29,10 @@ use hal::prelude::*;
 use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
 
+mod message_manager;
+
+use message_manager::{message_pop, message_push};
+
 type Timer7 = Timer<pac::TIM7>;
 static TIMER7: Mutex<RefCell<Option<Timer7>>> = Mutex::new(RefCell::new(None));
 
@@ -145,8 +149,8 @@ fn decode_messages(buf: &mut [u8], link: &mut Link) {
             break;
         }
     }
-
 }
+
 
 #[interrupt]
 fn TIM7() {
