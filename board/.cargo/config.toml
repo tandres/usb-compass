@@ -9,3 +9,7 @@ rustflags = [
 
 [build]
 target = "thumbv7em-none-eabihf"
+
+[profile.dev]
+opt-level = "s"
+lto = true

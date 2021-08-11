@@ -56,7 +56,7 @@ impl Link {
         let mut res = None;
         if present {
             if packet.len() != 0 {
-                match Message::from_bytes(&self.scratch[..self.scratch_offset]) {
+                match Message::from_bytes(&mut self.scratch[..self.scratch_offset]) {
                     Ok(msg) => {
                         res = Some(msg);
                     }

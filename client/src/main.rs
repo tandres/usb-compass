@@ -1,62 +1,31 @@
-use libusb::{Context, Device, DeviceHandle};
+use common::{
+    message::Message,
+    link::Link,
+    usb::{VENDOR_ID, PROD_ID},
+};
+use log::*;
+use rusb::{Device, DeviceHandle, UsbContext, Error as UsbError};
 use std::time::Duration;
-use common::usb::{VENDOR_ID, PROD_ID};
 use tokio::{
-    sync::mpsc::{UnboundedSender, UnboundedReceiver},
+    sync::broadcast::{channel, Sender, Receiver, error::TryRecvError},
     time::sleep,
 };
-
 mod error;
 
 pub use error::{CompError, Result};
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_millis(500);
+const WRITE_TIMEOUT: Duration = Duration::from_millis(10);
+const READ_TIMEOUT: Duration = Duration::from_millis(10);
 const WRITE_ADDR: u8 = 2;
 const READ_ADDR: u8 = 130;
+const DESIRED_CONFIG: u8 = 1;
+const SERIAL_DATA_INTERFACE: u8 = 1;
 
-type Message = Vec<u8>;
-
-fn scan<'a>(context: &'a Context) -> Result<Option<Device<'a>>> {
-    println!("Scanning!");
-    for device in context.devices()?.iter() {
-        let device_desc = device.device_descriptor()?;
-
-        println!("Bux {:03} Device {:03} ID {:04x}:{:04x} configs: {}",
-            device.bus_number(),
-            device.address(),
-            device_desc.vendor_id(),
-            device_desc.product_id(),
-            device_desc.num_configurations());
-        if device_desc.vendor_id() == VENDOR_ID && device_desc.product_id() == PROD_ID {
-            println!("Found matching device!");
-            return Ok(Some(device));
-        }
-    }
-    return Ok(None);
-}
-
-
-fn configure<'a>(device: &Device<'a>, config_num: u8, claims: Vec<u8>) -> Result<DeviceHandle<'a>> {
-    // Just sort of assuming now that this is our device. Maybe I will do more
-    // with this later?
-    let mut handle = device.open()?;
-    if handle.kernel_driver_active(config_num)? {
-        handle.detach_kernel_driver(config_num)?;
-    }
-    for claim in claims {
-        handle.claim_interface(claim)?;
-    }
-    Ok(device.open()?)
-}
-
-fn print_device_info<'a>(device: &Device<'a>, print: bool) -> Result<()> {
-    if !print {
-        return Ok(());
-    }
+fn print_device_info<T: UsbContext>(device: Device<T>) -> Result<()> {
     let number_configs = device.device_descriptor()?.num_configurations();
     let active_config_descriptor = device.active_config_descriptor()?;
     let active_number = active_config_descriptor.number();
-    println!("Device has {} configurations:", number_configs);
+    info!("Device has {} configurations:", number_configs);
     for i in 0..number_configs {
         let config = device.config_descriptor(i)?;
         let config_number = config.number();
@@ -65,15 +34,15 @@ fn print_device_info<'a>(device: &Device<'a>, print: bool) -> Result<()> {
         } else {
             ""
         };
-        println!("\tConfig {}{}:", config_number, active_flag);
-        println!("\tInterfaces {}:", config.num_interfaces());
+        trace!("\tConfig {}{}:", config_number, active_flag);
+        trace!("\tInterfaces {}:", config.num_interfaces());
         for interface in config.interfaces() {
-            println!("\t\tInterface no {}:", interface.number());
+            trace!("\t\tInterface no {}:", interface.number());
             for desc in interface.descriptors() {
-                println!("\t\t\tDescriptor no {}", desc.interface_number());
-                println!("\t\t\tEndpoints {}:", desc.num_endpoints());
+                trace!("\t\t\tDescriptor no {}", desc.interface_number());
+                trace!("\t\t\tEndpoints {}:", desc.num_endpoints());
                 for endpoint in desc.endpoint_descriptors() {
-                    println!("\t\t\t\t#{} @{} dir:{:?} type:{:?}",
+                    trace!("\t\t\t\t#{} @{} dir:{:?} type:{:?}",
                         endpoint.number(),
                         endpoint.address(),
                         endpoint.direction(),
@@ -85,59 +54,117 @@ fn print_device_info<'a>(device: &Device<'a>, print: bool) -> Result<()> {
     Ok(())
 }
 
-fn read_bulk<'a>(addr: u8, handle: &DeviceHandle<'a>) -> Result<Message> {
-    let mut buf: [u8; 64] = [0; 64];
-    let num = handle.read_bulk(addr, &mut buf, DEFAULT_TIMEOUT)?;
-    Ok(buf[..num].to_vec())
-}
+// fn read_bulk<'a>(addr: u8, handle: &DeviceHandle<'a>, link: &mut Link) -> Result<Message> {
+//     let mut buf: [u8; 64] = [0; 64];
+//     match handle.read_bulk(addr, &mut buf, DEFAULT_TIMEOUT)
 
-fn write_bulk<'a>(addr: u8, buf: &[u8], handle: &DeviceHandle<'a>) -> Result<usize> {
-    Ok(handle.write_bulk(addr, buf, DEFAULT_TIMEOUT)?)
-}
+// }
 
-async fn usb(mut to_board_rx: UnboundedReceiver<Message>, from_board_tx: UnboundedSender<Message>) -> Result<()> {
-    let context = libusb::Context::new()?;
+// fn write_bulk<'a>(addr: u8, buf: &[u8], handle: &DeviceHandle<'a>) -> Result<usize> {
+//     Ok(handle.write_bulk(addr, buf, DEFAULT_TIMEOUT)?)
+// }
 
+fn usb_read<T: UsbContext>(handle: &mut DeviceHandle<T>, link: &mut Link) -> Result<Vec<Message>> {
+    let mut buf = [0u8; Message::MAX_SIZE];
+    let mut messages = Vec::new();
+    let read = match handle.read_bulk(READ_ADDR, &mut buf, READ_TIMEOUT) {
+        Ok(read) => read,
+        Err(UsbError::Timeout) => return Ok(messages),
+        Err(e) => Err(e)?,
+    };
+    let mut offset = 0;
     loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        if let Some(device) = scan(&context)? {
-            print_device_info(&device, true)?;
-            let handle = configure(&device, 1, vec![1])?;
-            loop {
-                if let Some(msg) = to_board_rx.recv().await {
-                    println!("Sending: {:?}", msg);
-                    if write_bulk(WRITE_ADDR, &msg, &handle).is_err() {
-                        break;
-                    }
-                }
-                match read_bulk(READ_ADDR, &handle) {
-                    Ok(buf) => {
-                        println!("Received: {:?}", buf);
-                        from_board_tx.send(buf).unwrap();
-                    }
-                    Err(e) => {
-                        println!("Error: {}", e);
-                        break;
-                    }
-                }
+        let (size, rx) = link.decode(&buf[offset..read])?;
+        if size == 0 {
+            break;
+        }
+        if let Some(msg) = rx {
+            messages.push(msg);
+        }
+        offset += size;
+    }
+    Ok(messages)
+}
+
+fn usb_write<T: UsbContext>(handle: &mut DeviceHandle<T>, msg: Message, link: &mut Link) -> Result<()> {
+    let mut buf = [0u8; Message::MAX_SIZE];
+    let size = link.encode(&msg, &mut buf)?;
+    let write_size = handle.write_bulk(WRITE_ADDR, &buf[..size], WRITE_TIMEOUT)?;
+    if size > write_size {
+        log::warn!("Partial usb write!");
+    }
+    Ok(())
+}
+
+async fn usb_link<T: UsbContext>(
+    to_board: &mut Receiver<Message>,
+    from_board: &Sender<Message>,
+    mut handle: DeviceHandle<T>,
+) -> Result<()> {
+    let mut link = Link::new();
+    trace!("Starting usb link loop");
+    loop {
+        for msg in usb_read(&mut handle, &mut link)? {
+            log::trace!("Received {:?}", msg);
+            from_board.send(msg)?;
+        }
+
+        loop {
+            match to_board.try_recv() {
+                Ok(msg) => usb_write(&mut handle, msg, &mut link)?,
+                Err(TryRecvError::Empty) => break,
+                Err(e) => Err(e)?,
             }
-        } else {
-            continue;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn usb_configure<T: UsbContext>(handle: &mut DeviceHandle<T>) -> Result<()> {
+    if DESIRED_CONFIG != handle.active_configuration()? {
+        handle.set_active_configuration(DESIRED_CONFIG)?;
+    }
+
+    print_device_info(handle.device()).unwrap();
+    if handle.kernel_driver_active(SERIAL_DATA_INTERFACE)? {
+        handle.detach_kernel_driver(SERIAL_DATA_INTERFACE)?;
+    }
+
+    handle.claim_interface(SERIAL_DATA_INTERFACE)?;
+    Ok(())
+}
+
+async fn usb(mut to_board_rx: Receiver<Message>, from_board_tx: Sender<Message>) -> Result<()> {
+    let mut sleep_time = 1;
+    loop {
+        tokio::time::sleep(Duration::from_secs(sleep_time)).await;
+        if let Some(mut handle) = rusb::open_device_with_vid_pid(VENDOR_ID, PROD_ID) {
+            if let Err(e) = usb_configure(&mut handle) {
+                error!("Failed to configure usb device! {}", e);
+                sleep_time = 10;
+                continue;
+            }
+            usb_link(&mut to_board_rx, &from_board_tx, handle).await?;
         }
     }
 }
 
-async fn chatter(to_board_tx: UnboundedSender<Message>, mut from_board_rx: UnboundedReceiver<Message>) {
+
+async fn chatter(to_board_tx: Sender<Message>, mut from_board_rx: Receiver<Message>) {
     tokio::spawn(async move {
+        trace!("Starting receiver loop");
         loop {
-            if let Some(val) = from_board_rx.recv().await {
-                println!("Board said: {:?}", String::from_utf8_lossy(&val));
+            match from_board_rx.recv().await {
+                Ok(msg) => trace!("Board said: {:?}", msg),
+                Err(e) => error!("{:?}", e),
             }
         }
     });
+    trace!("Starting chatter loop");
     loop {
-        sleep(Duration::from_secs(1)).await;
-        let msg = b"hello!".to_vec();
+        sleep(Duration::from_secs(5)).await;
+        trace!("Saying hello");
+        let msg = Message::Hello;
         to_board_tx.send(msg).unwrap();
     }
 }
@@ -145,17 +172,18 @@ async fn chatter(to_board_tx: UnboundedSender<Message>, mut from_board_rx: Unbou
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let (to_board_tx, to_board_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (from_board_tx, from_board_rx) = tokio::sync::mpsc::unbounded_channel();
+    env_logger::init();
+    let (to_board_tx, to_board_rx) = channel(10);
+    let (from_board_tx, from_board_rx) = channel(10);
     let usb = usb(to_board_rx, from_board_tx);
     let chatter = chatter(to_board_tx, from_board_rx);
 
     tokio::select! {
-        _ = usb => {
-            println!("Usb returned");
+        res = usb => {
+            println!("Usb returned: {:?}", res);
         }
-        _ = chatter => {
-            println!("Chatter returned");
+        res = chatter => {
+            println!("Chatter returned: {:?}", res);
         }
     }
 }

@@ -73,9 +73,9 @@ fn main() -> ! {
     };
     let usb_bus = UsbBusType::new(usb);
 
-    let serial = SerialPort::new(&usb_bus);
+    let mut serial = SerialPort::new(&usb_bus);
 
-    let mut link = Link::new(serial);
+    let mut link = Link::new();
     // Thanks interbiometrics!
     let vid_pid = UsbVidPid(VENDOR_ID, PROD_ID);
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, vid_pid)
@@ -98,41 +98,55 @@ fn main() -> ! {
     hprintln!("Starting loop!").unwrap();
 
     loop {
-        if !usb_dev.poll(&mut [&mut link]) {
+        if !usb_dev.poll(&mut [&mut serial]) {
             continue;
         }
 
-        let msg = link.try_recv().unwrap();
-        hprintln!("{:?}", msg).unwrap();
-
-        // let mut buf = [0u8, 64];
-
-        // match serial.read(&mut buf) {
-        //     Ok(count) if count > 0 => {
-        //         red_led.set_high().ok();
-
-        //         for c in buf[0..count].iter_mut() {
-        //             if 0x61 <= *c && *c <= 0x7a {
-        //                 *c &= !0x20;
-        //             }
-        //         }
-
-        //         let mut write_offset = 0;
-        //         while write_offset < count {
-        //             match serial.write(&buf[write_offset..count]) {
-        //                 Ok(len) if len > 0 => {
-        //                     write_offset += len;
-        //                 }
-        //                 _ => {}
-        //             }
-        //         }
-        //     }
-        //     _ => {}
-        // }
-        // red_led.set_low().ok();
+        let mut buf = [0u8, 64];
+        match serial.read(&mut buf) {
+            Ok(count) if count > 0 => {
+                red_led.set_high().ok();
+                decode_messages(&mut buf[..count], &mut link);
+                let mut write_offset = 0;
+                while write_offset < count {
+                    match serial.write(&buf[write_offset..count]) {
+                        Ok(len) if len > 0 => {
+                            write_offset += len;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        red_led.set_low().ok();
     }
 }
 
+fn decode_messages(buf: &mut [u8], link: &mut Link) {
+    let length = buf.len();
+    let mut offset = 0;
+    loop {
+        let read = match link.decode(&buf[offset..]) {
+            Ok((read, Some(msg))) => {
+                let _ = hprintln!("Recieved msg: {:?}", msg);
+                read
+            }
+            Ok((read, None)) => {
+                read
+            }
+            Err(e) => {
+                let _ = hprintln!("Error decoding! {:?}", e);
+                break;
+            }
+        };
+        offset += read;
+        if offset == length {
+            break;
+        }
+    }
+
+}
 
 #[interrupt]
 fn TIM7() {

@@ -4,20 +4,22 @@ use serde_cbor::{
     ser::SliceWrite,
     Serializer,
     error::Error as CborError,
-    de::from_slice,
+    de::from_mut_slice,
+    Deserializer,
 };
 
 big_array! { BigArray; }
 
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub enum Message {
     Nop,
     Hello,
+    HelloAck,
     Log(InternalBuffer),
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct InternalBuffer {
     #[serde(with = "BigArray")]
     b: [u8; 128],
@@ -49,8 +51,8 @@ impl Message {
         Ok(ser.into_inner().bytes_written())
     }
 
-    pub fn from_bytes(buf: &[u8]) -> Result<Message, CborError> {
-        from_slice(buf)
+    pub fn from_bytes(buf: &mut [u8]) -> Result<Message, CborError> {
+        from_mut_slice(buf)
     }
 
     pub fn log<T: AsRef<[u8]>>(t: T) -> Self {
