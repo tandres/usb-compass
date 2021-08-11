@@ -9,6 +9,7 @@ use stm32f3xx_hal as hal;
 use common::{
     link::Link,
     usb::{VENDOR_ID, PROD_ID},
+    Message,
 };
 
 use core::cell::RefCell;
@@ -98,33 +99,61 @@ fn main() -> ! {
     });
 
     unsafe { pac::NVIC::unmask(pac::Interrupt::TIM7) };
-
-    hprintln!("Starting loop!").unwrap();
+    message_manager::setup();
+    let _ = hprintln!("Starting loop!");
 
     loop {
         if !usb_dev.poll(&mut [&mut serial]) {
             continue;
         }
 
-        let mut buf = [0u8, 64];
+        let mut buf = [0u8; 256];
         match serial.read(&mut buf) {
             Ok(count) if count > 0 => {
                 red_led.set_high().ok();
                 decode_messages(&mut buf[..count], &mut link);
-                let mut write_offset = 0;
-                while write_offset < count {
-                    match serial.write(&buf[write_offset..count]) {
-                        Ok(len) if len > 0 => {
-                            write_offset += len;
-                        }
-                        _ => {}
-                    }
-                }
             }
             _ => {}
         }
         red_led.set_low().ok();
+
+
+        if let Some(msg) = message_pop() {
+            let _ = hprintln!("Sending message");
+            encode_and_send(msg, &mut buf, &mut link, &mut serial);
+        }
     }
+}
+
+fn encode_and_send<T: usb_device::bus::UsbBus>(
+    msg: Message,
+    buf: &mut [u8],
+    link: &mut Link,
+    serial: &mut SerialPort<T>
+) {
+    match link.encode(&msg, buf) {
+        Ok(size) => {
+            let mut write_offset = 0;
+            while write_offset < size {
+                match serial.write(&buf[write_offset..size]) {
+                    Ok(len) if len > 0 => {
+                        write_offset += len;
+                    }
+                    Ok(_) => {
+                        break;
+                    }
+                    Err(e) => {
+                        let _ = hprintln!("Partial write! {:?}", e);
+                        break;
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            let _ = hprintln!("Failed to encode! {:?}", e);
+        }
+    }
+
 }
 
 fn decode_messages(buf: &mut [u8], link: &mut Link) {
@@ -134,6 +163,7 @@ fn decode_messages(buf: &mut [u8], link: &mut Link) {
         let read = match link.decode(&buf[offset..]) {
             Ok((read, Some(msg))) => {
                 let _ = hprintln!("Recieved msg: {:?}", msg);
+                process_message(msg);
                 read
             }
             Ok((read, None)) => {
@@ -151,6 +181,18 @@ fn decode_messages(buf: &mut [u8], link: &mut Link) {
     }
 }
 
+fn process_message(msg: Message) {
+    use common::Message::*;
+    match msg {
+        Nop => (),
+        Hello => {
+            message_push(Message::HelloAck);
+            ()
+        }
+        HelloAck => (),
+        _ => (),
+    }
+}
 
 #[interrupt]
 fn TIM7() {
