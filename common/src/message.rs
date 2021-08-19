@@ -16,6 +16,10 @@ pub enum Message {
     Hello,
     HelloAck,
     Log(InternalBuffer),
+    AccelReq,
+    Accel(f32, f32, f32),
+    MagReq,
+    Mag(i16, i16, i16),
 }
 
 impl Default for Message {

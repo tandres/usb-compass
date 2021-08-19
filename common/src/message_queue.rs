@@ -45,7 +45,7 @@ impl MessageQueue {
     }
 
     fn next(&self, x: usize, a: usize) -> usize {
-        x + a % self.capacity
+        (x + a) % self.capacity
     }
 
     pub fn capacity(&self) -> usize {
@@ -78,6 +78,19 @@ mod tests {
         }
 
         assert!(mm.dequeue().is_none());
+    }
+
+    #[test]
+    fn wrap() {
+        let mut mm = MessageQueue::new();
+        let msg = Message::Hello;
+
+        for _ in 0..mm.capacity() {
+            mm.enqueue(&msg).unwrap();
+        }
+        assert!(mm.enqueue(&msg).is_err());
+        let _ = mm.dequeue().unwrap();
+        assert!(mm.enqueue(&msg).is_ok());
     }
 
     #[test]

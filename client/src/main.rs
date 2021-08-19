@@ -162,9 +162,10 @@ async fn chatter(to_board_tx: Sender<Message>, mut from_board_rx: Receiver<Messa
     });
     trace!("Starting chatter loop");
     loop {
-        sleep(Duration::from_secs(5)).await;
-        trace!("Saying hello");
-        let msg = Message::Hello;
+        sleep(Duration::from_millis(500)).await;
+        let msg = Message::MagReq;
+        to_board_tx.send(msg).unwrap();
+        let msg = Message::AccelReq;
         to_board_tx.send(msg).unwrap();
     }
 }

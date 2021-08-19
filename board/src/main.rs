@@ -18,6 +18,12 @@ use cortex_m::{asm::delay, interrupt::Mutex};
 use cortex_m_rt::entry;
 use cortex_m_semihosting::hprintln;
 
+use accelerometer::{
+    Accelerometer,
+    vector::{F32x3, I16x3},
+};
+use stm32f3_discovery::compass::Compass;
+
 use hal::{
     gpio::{gpioe, Output, PushPull},
     interrupt,
@@ -40,8 +46,29 @@ static TIMER7: Mutex<RefCell<Option<Timer7>>> = Mutex::new(RefCell::new(None));
 type GreenLed = gpioe::PE15<Output<PushPull>>;
 static GREENLED: Mutex<RefCell<Option<GreenLed>>> = Mutex::new(RefCell::new(None));
 
+type OrangeLed = gpioe::PE14<Output<PushPull>>;
+static ORANGELED: Mutex<RefCell<Option<OrangeLed>>> = Mutex::new(RefCell::new(None));
+
+static TRIGGER_READ: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
+
+struct App {
+    mag_data: I16x3,
+    accel_data: F32x3,
+}
+
+impl App {
+    fn new() -> App {
+        App {
+            mag_data: I16x3::new(0, 0, 0),
+            accel_data: F32x3::new(0., 0., 0.),
+        }
+    }
+}
+
 #[entry]
 fn main() -> ! {
+    let mut app = App::new();
+
     let peris = pac::Peripherals::take().unwrap();
     let mut acr = peris.FLASH.constrain().acr;
     let mut rcc = peris.RCC.constrain();
@@ -53,12 +80,14 @@ fn main() -> ! {
         .pclk2(24.MHz())
         .freeze(&mut acr);
 
+    let mut gpioa = peris.GPIOA.split(&mut rcc.ahb);
+    let mut gpiob = peris.GPIOB.split(&mut rcc.ahb);
     let mut gpioe = peris.GPIOE.split(&mut rcc.ahb);
+
     let mut red_led = gpioe.pe13.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
+    let orange_led = gpioe.pe14.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
     let green_led = gpioe.pe15.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
 
-
-    let mut gpioa = peris.GPIOA.split(&mut rcc.ahb);
     let mut usb_dp = gpioa
         .pa12
         .into_push_pull_output(&mut gpioa.moder, &mut gpioa.otyper);
@@ -70,6 +99,18 @@ fn main() -> ! {
         .into_af14_push_pull(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
     let usb_dp = usb_dp
         .into_af14_push_pull(&mut gpioa.moder, &mut gpioa.otyper, &mut gpioa.afrh);
+
+    let mut compass = Compass::new(
+        gpiob.pb6,
+        gpiob.pb7,
+        &mut gpiob.moder,
+        &mut gpiob.otyper,
+        &mut gpiob.afrl,
+        peris.I2C1,
+        clocks,
+        &mut rcc.apb1,
+    )
+    .unwrap();
 
     let usb = Peripheral {
         usb: peris.USB,
@@ -96,6 +137,8 @@ fn main() -> ! {
     cortex_m::interrupt::free(|cs| {
         *TIMER7.borrow(cs).borrow_mut() = Some(tim7);
         *GREENLED.borrow(cs).borrow_mut() = Some(green_led);
+        *ORANGELED.borrow(cs).borrow_mut() = Some(orange_led);
+        *TRIGGER_READ.borrow(cs).borrow_mut() = false;
     });
 
     unsafe { pac::NVIC::unmask(pac::Interrupt::TIM7) };
@@ -111,17 +154,35 @@ fn main() -> ! {
         match serial.read(&mut buf) {
             Ok(count) if count > 0 => {
                 red_led.set_high().ok();
-                decode_messages(&mut buf[..count], &mut link);
+                decode_messages(&mut buf[..count], &mut link, &mut app);
             }
             _ => {}
         }
         red_led.set_low().ok();
 
-
         if let Some(msg) = message_pop() {
-            let _ = hprintln!("Sending message");
             encode_and_send(msg, &mut buf, &mut link, &mut serial);
         }
+        let mut read = false;
+        cortex_m::interrupt::free(|cs| {
+            read = TRIGGER_READ.borrow(cs).replace(false);
+        });
+        if read {
+            read_accel(&mut compass, &mut app);
+            read_mag(&mut compass, &mut app);
+        }
+    }
+}
+
+fn read_accel(compass: &mut Compass, app: &mut App) {
+    if let Ok(accel) = compass.accel_norm() {
+        app.accel_data = accel;
+    }
+}
+
+fn read_mag(compass: &mut Compass, app: &mut App) {
+    if let Ok(mag) = compass.mag_raw() {
+        app.mag_data = mag;
     }
 }
 
@@ -156,14 +217,13 @@ fn encode_and_send<T: usb_device::bus::UsbBus>(
 
 }
 
-fn decode_messages(buf: &mut [u8], link: &mut Link) {
+fn decode_messages(buf: &mut [u8], link: &mut Link, app: &mut App) {
     let length = buf.len();
     let mut offset = 0;
     loop {
         let read = match link.decode(&buf[offset..]) {
             Ok((read, Some(msg))) => {
-                let _ = hprintln!("Recieved msg: {:?}", msg);
-                process_message(msg);
+                process_message(msg, app);
                 read
             }
             Ok((read, None)) => {
@@ -175,13 +235,13 @@ fn decode_messages(buf: &mut [u8], link: &mut Link) {
             }
         };
         offset += read;
-        if offset == length {
+        if offset >= length {
             break;
         }
     }
 }
 
-fn process_message(msg: Message) {
+fn process_message(msg: Message, app: &mut App) {
     use common::Message::*;
     match msg {
         Nop => (),
@@ -190,6 +250,16 @@ fn process_message(msg: Message) {
             ()
         }
         HelloAck => (),
+        AccelReq => {
+            let accel = &app.accel_data;
+            let msg = Message::Accel(accel.x, accel.y, accel.z);
+            message_push(msg);
+        },
+        MagReq => {
+            let mag = &app.mag_data;
+            let msg = Message::Mag(mag.x, mag.y, mag.z);
+            message_push(msg);
+        },
         _ => (),
     }
 }
@@ -199,5 +269,7 @@ fn TIM7() {
     cortex_m::interrupt::free(|cs| {
         TIMER7.borrow(cs).borrow_mut().as_mut().unwrap().clear_update_interrupt_flag();
         GREENLED.borrow(cs).borrow_mut().as_mut().unwrap().toggle().unwrap();
+        TRIGGER_READ.borrow(cs).replace(true);
     });
 }
+
