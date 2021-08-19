@@ -13,20 +13,20 @@ pub enum CompError {
     },
     #[error("Link Error: {0}")]
     LinkError(String),
-    #[error("Tokio Send Error {error}")]
-    TokioSendError {
+    #[error("Sync Send Error {error}")]
+    SendError {
         #[from]
-        error: tokio::sync::broadcast::error::SendError<Message>,
+        error: std::sync::mpsc::SendError<Message>,
     },
-    #[error("Tokio Recv Error {error}")]
-    TokioRecvError {
+    #[error("Sync Recv Error {error}")]
+    RecvError {
         #[from]
-        error: tokio::sync::broadcast::error::RecvError,
+        error: std::sync::mpsc::RecvError,
     },
-    #[error("Tokio TryRecv Error {error}")]
-    TokioTryRecvError {
+    #[error("Sync TryRecv Error {error}")]
+    TryRecvError {
         #[from]
-        error: tokio::sync::broadcast::error::TryRecvError,
+        error: std::sync::mpsc::TryRecvError,
     }
 }
 

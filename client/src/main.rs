@@ -3,13 +3,13 @@ use common::{
     link::Link,
     usb::{VENDOR_ID, PROD_ID},
 };
-use log::*;
+use log::{trace, info};
 use rusb::{Device, DeviceHandle, UsbContext, Error as UsbError};
 use std::time::Duration;
-use tokio::{
-    sync::broadcast::{channel, Sender, Receiver, error::TryRecvError},
-    time::sleep,
-};
+use std::thread::sleep;
+use std::sync::{Arc, mpsc::{channel, Sender, Receiver, TryRecvError}, Mutex};
+use bevy::{pbr::AmbientLight, prelude::*};
+
 mod error;
 
 pub use error::{CompError, Result};
@@ -54,16 +54,6 @@ fn print_device_info<T: UsbContext>(device: Device<T>) -> Result<()> {
     Ok(())
 }
 
-// fn read_bulk<'a>(addr: u8, handle: &DeviceHandle<'a>, link: &mut Link) -> Result<Message> {
-//     let mut buf: [u8; 64] = [0; 64];
-//     match handle.read_bulk(addr, &mut buf, DEFAULT_TIMEOUT)
-
-// }
-
-// fn write_bulk<'a>(addr: u8, buf: &[u8], handle: &DeviceHandle<'a>) -> Result<usize> {
-//     Ok(handle.write_bulk(addr, buf, DEFAULT_TIMEOUT)?)
-// }
-
 fn usb_read<T: UsbContext>(handle: &mut DeviceHandle<T>, link: &mut Link) -> Result<Vec<Message>> {
     let mut buf = [0u8; Message::MAX_SIZE];
     let mut messages = Vec::new();
@@ -96,7 +86,7 @@ fn usb_write<T: UsbContext>(handle: &mut DeviceHandle<T>, msg: Message, link: &m
     Ok(())
 }
 
-async fn usb_link<T: UsbContext>(
+fn usb_link<T: UsbContext>(
     to_board: &mut Receiver<Message>,
     from_board: &Sender<Message>,
     mut handle: DeviceHandle<T>,
@@ -116,7 +106,7 @@ async fn usb_link<T: UsbContext>(
                 Err(e) => Err(e)?,
             }
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(50));
     }
 }
 
@@ -134,35 +124,44 @@ fn usb_configure<T: UsbContext>(handle: &mut DeviceHandle<T>) -> Result<()> {
     Ok(())
 }
 
-async fn usb(mut to_board_rx: Receiver<Message>, from_board_tx: Sender<Message>) -> Result<()> {
+fn usb(mut to_board_rx: Receiver<Message>, from_board_tx: Sender<Message>) -> Result<()> {
     let mut sleep_time = 1;
     loop {
-        tokio::time::sleep(Duration::from_secs(sleep_time)).await;
+        sleep(Duration::from_secs(sleep_time));
         if let Some(mut handle) = rusb::open_device_with_vid_pid(VENDOR_ID, PROD_ID) {
             if let Err(e) = usb_configure(&mut handle) {
                 error!("Failed to configure usb device! {}", e);
                 sleep_time = 10;
                 continue;
             }
-            usb_link(&mut to_board_rx, &from_board_tx, handle).await?;
+            usb_link(&mut to_board_rx, &from_board_tx, handle)?;
         }
     }
 }
 
 
-async fn chatter(to_board_tx: Sender<Message>, mut from_board_rx: Receiver<Message>) {
-    tokio::spawn(async move {
+fn chatter(to_board_tx: Sender<Message>, from_board_rx: Receiver<Message>, accel: Arc<Mutex<(f32, f32, f32)>>) {
+    std::thread::spawn(move || {
         trace!("Starting receiver loop");
         loop {
-            match from_board_rx.recv().await {
-                Ok(msg) => trace!("Board said: {:?}", msg),
+            match from_board_rx.recv() {
+                Ok(msg) => {
+                    trace!("Board said: {:?}", msg);
+                    if let Message::Accel(x, y, z) = msg {
+                        let mut data = accel.lock().unwrap();
+                        data.0 = x;
+                        data.1 = y;
+                        data.2 = z;
+                    }
+
+                }
                 Err(e) => error!("{:?}", e),
             }
         }
     });
     trace!("Starting chatter loop");
     loop {
-        sleep(Duration::from_millis(500)).await;
+        sleep(Duration::from_millis(500));
         let msg = Message::MagReq;
         to_board_tx.send(msg).unwrap();
         let msg = Message::AccelReq;
@@ -171,21 +170,82 @@ async fn chatter(to_board_tx: Sender<Message>, mut from_board_rx: Receiver<Messa
 }
 
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+fn main() {
     env_logger::init();
-    let (to_board_tx, to_board_rx) = channel(10);
-    let (from_board_tx, from_board_rx) = channel(10);
-    let usb = usb(to_board_rx, from_board_tx);
-    let chatter = chatter(to_board_tx, from_board_rx);
+    let (to_board_tx, to_board_rx) = channel();
+    let (from_board_tx, from_board_rx) = channel();
+    std::thread::spawn( move || {
+        usb(to_board_rx, from_board_tx).unwrap();
+    });
+    let accel = Arc::new(Mutex::new((0., 0., 0.)));
+    let accel_clone = accel.clone();
+    std::thread::spawn( move || {
+        chatter(to_board_tx, from_board_rx, accel_clone);
+    });
+    App::build()
+        .add_plugins(DefaultPlugins)
+        .add_plugin(HelloPlugin)
+        .insert_resource(AccelData(accel))
+        .add_system(accel_system.system())
+        .run();
+}
 
-    tokio::select! {
-        res = usb => {
-            println!("Usb returned: {:?}", res);
-        }
-        res = chatter => {
-            println!("Chatter returned: {:?}", res);
-        }
+pub struct HelloPlugin;
+
+impl Plugin for HelloPlugin {
+    fn build(&self, app: &mut AppBuilder) {
+        app.insert_resource(AmbientLight {
+                color: Color::WHITE,
+                brightness: 1.0 / 5.0f32,
+            })
+            .add_startup_system(setup_scene.system())
+            .add_system(rotator_system.system());
     }
 }
 
+fn setup_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    // commands.spawn_bundle( PbrBundle {
+    //     mesh: meshes.add(Mesh::from(shape::Box::new(4.0, 0.5, 2.0))),
+    //     material: materials.add(Color::rgb(0.3, 0.5, 0.5).into()),
+    //     transform: Transform::from_xyz(0.0, 0.5, 0.0),
+    //     ..Default::default()
+    // }).insert(Rotates);
+    commands.spawn_bundle( PbrBundle {
+        mesh: meshes.add(Mesh::from(shape::Cube { size: 0.2 })),
+        material: materials.add(Color::rgb(0.3, 0.0, 0.0).into()),
+        transform: Transform::from_xyz(0.0, 0.5, 0.0),
+        ..Default::default()
+    }).insert(AccelVector);
+    commands.spawn_bundle( LightBundle {
+        transform: Transform::from_xyz(1.0, 1.0, 1.0),
+        ..Default::default()
+    });
+    commands.spawn_bundle( PerspectiveCameraBundle {
+        transform: Transform::from_xyz(-2.0, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        ..Default::default()
+    });
+
+}
+
+struct AccelData(Arc<Mutex<(f32, f32, f32)>>);
+
+struct AccelVector;
+
+fn accel_system(accel_data: Res<AccelData>, mut query: Query<&mut Transform, With<AccelVector>>) {
+    let (x, y, z) = accel_data.0.lock().unwrap().clone();
+    for mut transform in query.iter_mut() {
+        *transform = Transform::from_xyz(x, y, z);
+    }
+}
+
+struct Rotates;
+
+fn rotator_system(time: Res<Time>, mut query: Query<&mut Transform, With<Rotates>>) {
+    for mut transform in query.iter_mut() {
+        *transform = Transform::from_rotation(Quat::from_rotation_y((4.0 * std::f32::consts::PI / 20.0) * time.delta_seconds(),)) * *transform;
+    }
+}
