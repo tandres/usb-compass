@@ -46,9 +46,6 @@ static TIMER7: Mutex<RefCell<Option<Timer7>>> = Mutex::new(RefCell::new(None));
 type GreenLed = gpioe::PE15<Output<PushPull>>;
 static GREENLED: Mutex<RefCell<Option<GreenLed>>> = Mutex::new(RefCell::new(None));
 
-type OrangeLed = gpioe::PE14<Output<PushPull>>;
-static ORANGELED: Mutex<RefCell<Option<OrangeLed>>> = Mutex::new(RefCell::new(None));
-
 static TRIGGER_READ: Mutex<RefCell<bool>> = Mutex::new(RefCell::new(false));
 
 struct App {
@@ -85,7 +82,7 @@ fn main() -> ! {
     let mut gpioe = peris.GPIOE.split(&mut rcc.ahb);
 
     let mut red_led = gpioe.pe13.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
-    let orange_led = gpioe.pe14.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
+    let mut orange_led = gpioe.pe14.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
     let green_led = gpioe.pe15.into_push_pull_output(&mut gpioe.moder, &mut gpioe.otyper);
 
     let mut usb_dp = gpioa
@@ -137,7 +134,6 @@ fn main() -> ! {
     cortex_m::interrupt::free(|cs| {
         *TIMER7.borrow(cs).borrow_mut() = Some(tim7);
         *GREENLED.borrow(cs).borrow_mut() = Some(green_led);
-        *ORANGELED.borrow(cs).borrow_mut() = Some(orange_led);
         *TRIGGER_READ.borrow(cs).borrow_mut() = false;
     });
 
@@ -168,8 +164,10 @@ fn main() -> ! {
             read = TRIGGER_READ.borrow(cs).replace(false);
         });
         if read {
+            orange_led.set_high().ok();
             read_accel(&mut compass, &mut app);
             read_mag(&mut compass, &mut app);
+            orange_led.set_low().ok();
         }
     }
 }
