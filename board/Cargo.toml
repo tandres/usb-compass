@@ -21,6 +21,3 @@ accelerometer = "0.12.0"
 version = "0.7.0"
 features = ["ld", "stm32f303xc", "stm32-usbd", "rt"]
 
-[profile.dev]
-opt-level = "s"
-lto = true
